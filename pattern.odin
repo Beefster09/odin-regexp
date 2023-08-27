@@ -55,6 +55,21 @@ compile :: proc(expr: string, allocator := context.allocator) -> (Pattern, Error
 		}
 	}
 
+	rune_node :: proc(frag: ^Fragment, rm: Rune_Matcher) -> (Fragment, []^NFA_State) {
+		state := new(NFA_State)
+		state^ = NFA_Rune{ matches = rm }
+		if frag.first_state == nil {
+			frag.first_state = state
+			frag.ends = new_ends(state)
+			return { state, frag.ends }, nil
+		} else {
+			link(frag.ends[:], state)
+			last_linked_ends := frag.ends[:]
+			frag.ends = new_ends(state)
+			return { state, frag.ends }, last_linked_ends
+		}
+	}
+
 	compile_fragment :: proc(expr: string) -> (frag: Fragment, err_all: Error) {
 		last_linked_ends: []^NFA_State
 		subfrag: Fragment  // latest piece of the fragment which is linked by quantifiers (?, *, +, {n,m})
@@ -117,30 +132,10 @@ compile :: proc(expr: string, allocator := context.allocator) -> (Pattern, Error
 				case '[': panic("not implemented")
 				case '\\': panic("not implemented")
 				case '.':
-					state := new(NFA_State)
-					state^ = NFA_Rune{ matches = {runes = Rune_Class.Any} }
-					if frag.first_state == nil {
-						frag.first_state = state
-						frag.ends = new_ends(state)
-					} else {
-						link(frag.ends[:], state)
-						last_linked_ends = frag.ends[:]
-						frag.ends = new_ends(state)
-					}
-					subfrag = { state, frag.ends }
+					subfrag, last_linked_ends = rune_node(&frag, {runes = Rune_Class.Any})
 
 				case:
-					state := new(NFA_State)
-					state^ = NFA_Rune{ matches = {runes = r} }
-					if frag.first_state == nil {
-						frag.first_state = state
-						frag.ends = new_ends(state)
-					} else {
-						link(frag.ends[:], state)
-						last_linked_ends = frag.ends[:]
-						frag.ends = new_ends(state)
-					}
-					subfrag = { state, frag.ends }
+					subfrag, last_linked_ends = rune_node(&frag, {runes = r})
 			}
 		}
 
