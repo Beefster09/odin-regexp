@@ -3,7 +3,6 @@ package regexp
 import sa "core:container/small_array"
 import "core:strings"
 import "core:runtime"
-import "core:intrinsics"
 
 Pattern :: struct {
 	initial_state: ^NFA_State,
@@ -14,118 +13,150 @@ Error :: union {
 	runtime.Allocator_Error,
 }
 
-Regexp_Error :: enum {
-	ASDF,
+Regexp_Error :: struct {
+	type: enum{
+		Dangling_Quantifier = 1,
+	},
+	position: int,
 }
 
-compile :: proc(expr: string, allocator := context.allocator) -> (pattern: Pattern, err_all: Error) {
-	Fragment :: struct {
-		first_state: ^NFA_State,
-		end_states: []^NFA_State,  // a list of all the unlinked states in the fragment (i.e. state.next == nil)
-	}
-
-	D :: struct {
-		fragments: sa.Small_Array(100, Fragment),
-		dangling_ends_pool: sa.Small_Array(200, ^NFA_State),
-	}
-	d: D
-
-	defer if err_all != nil {
-		for fragment in sa.slice(&d.fragments) {
-			destroy_nfa(fragment.first_state)
-		}
-	}
-
-	context.user_ptr = &d
+compile :: proc(expr: string, allocator := context.allocator) -> (Pattern, Error) {
 	context.allocator = allocator
 
-	push_state :: proc (state: NFA_State) -> ^Fragment {
-		d := cast(^D) context.user_ptr
-
-		state_ptr := new(NFA_State)
-		state_ptr^ = state
-
-		end_idx := sa.len(d.dangling_ends_pool)
-		sa.push_back(&d.dangling_ends_pool, state_ptr)
-
-		frag_idx := sa.len(d.fragments)
-		sa.push_back(&d.fragments, Fragment{state_ptr, sa.slice(&d.dangling_ends_pool)[end_idx:]})
-		return sa.get_ptr(&d.fragments, frag_idx)
+	Fragment :: struct {
+		first_state: ^NFA_State,
+		ends: [dynamic]^NFA_State,
 	}
 
-	push_empty :: proc () {
-		d := cast(^D) context.user_ptr
-		sa.push_back(&d.fragments, Fragment{nil, nil})
+	new_ends :: proc(states: ..^NFA_State) -> [dynamic]^NFA_State {
+		ends := make([dynamic]^NFA_State, context.temp_allocator)
+		append(&ends, ..states)
+		return ends
 	}
 
-	concat :: proc() {
-		d := cast(^D) context.user_ptr
-
-		f2 := sa.pop_back(&d.fragments)
-		f1 := sa.pop_back(&d.fragments)
-
-		if f1.first_state == nil {
-			sa.push_back(&d.fragments, f2)
-		} else {
-			for end_ptr in f1.end_states {
-				switch end_state in end_ptr {
-					case NFA_Rune:
-						end_state.next = f2.first_state
-						end_ptr^ = end_state
-					case NFA_Begin_Capture:
-						end_state.next = f2.first_state
-						end_ptr^ = end_state
-					case NFA_End_Capture:
-						end_state.next = f2.first_state
-						end_ptr^ = end_state
-					case NFA_Split:
-						end_state.options[1] = f2.first_state
-						end_ptr^ = end_state
-					case NFA_Accept:
-						panic("unreachable code")
-				}
+	link :: proc(ends: []^NFA_State, state: ^NFA_State) {
+		for end_ptr in ends {
+			switch end_state in end_ptr {
+				case NFA_Rune:
+					end_state.next = state
+					end_ptr^ = end_state
+				case NFA_Begin_Capture:
+					end_state.next = state
+					end_ptr^ = end_state
+				case NFA_End_Capture:
+					end_state.next = state
+					end_ptr^ = end_state
+				case NFA_Split:
+					end_state.options[1] = state
+					end_ptr^ = end_state
+				case NFA_Accept:
+					panic("unreachable code")
 			}
-			// remove the ends that we linked and update the fragment
-			num_ends := sa.len(d.dangling_ends_pool)
-			trim_idx := num_ends - (len(f1.end_states) + len(f2.end_states))
-			new_ends := sa.slice(&d.dangling_ends_pool)[trim_idx:trim_idx + len(f2.end_states)]
-			copy_slice(new_ends, f2.end_states)
-			sa.push_back(&d.fragments, Fragment{f1, new_ends})
 		}
 	}
 
-	push_empty()
+	compile_fragment :: proc(expr: string) -> (frag: Fragment, err_all: Error) {
+		last_linked_ends: []^NFA_State
+		subfrag: Fragment  // latest piece of the fragment which is linked by quantifiers (?, *, +, {n,m})
 
-	skip := 0
-	for r, i in expr {
-		if skip > 0 {
-			skip -= 1
-			continue
+		defer if err_all != nil {
+			destroy_nfa(frag.first_state)
 		}
 
-		switch r {
-			case '(':
-			case '|':
-				frag := sa.pop_back(&d.fragments)
-				push_empty()
-			case '?':
-			case '*':
-			case '+':
-			case '[':
-			case '\\':
-			case '.':
-				push_state(NFA_Rune{matches = { rule = Rune_Class.Any }})
-				concat()
-			case: // literal character
-				push_state(NFA_Rune{matches = { rule = r }})
-				concat()
+		skip := 0
+		for r, i in expr {
+			if skip > 0 {
+				skip -= 1
+				continue
+			}
+
+			switch r {
+				case '(': panic("not implemented")
+				case '|': panic("not implemented")
+
+				case '?':
+					if subfrag.first_state == nil {
+						return {}, Regexp_Error{.Dangling_Quantifier, i}
+					}
+					state := new(NFA_State)
+					state^ = NFA_Split{ {subfrag.first_state, nil} }
+					if last_linked_ends != nil {
+						link(last_linked_ends, state)
+					} else {
+						frag.first_state = state
+					}
+					append(&frag.ends, state)
+					subfrag = {nil, nil}
+
+				case '*':
+					if subfrag.first_state == nil {
+						return {}, Regexp_Error{.Dangling_Quantifier, i}
+					}
+					state := new(NFA_State)
+					state^ = NFA_Split{ {subfrag.first_state, nil} }
+					link(subfrag.ends[:], state)
+					if last_linked_ends != nil {
+						link(last_linked_ends, state)
+						last_linked_ends = nil
+					} else {
+						frag.first_state = state
+					}
+					frag.ends = new_ends(state)
+					subfrag = {nil, nil}
+
+				case '+':
+					if subfrag.first_state == nil {
+						return {}, Regexp_Error{.Dangling_Quantifier, i}
+					}
+					state := new(NFA_State)
+					state^ = NFA_Split{ {subfrag.first_state, nil} }
+					link(subfrag.ends[:], state)
+					frag.ends = new_ends(state)
+					subfrag = {nil, nil}
+
+				case '[': panic("not implemented")
+				case '\\': panic("not implemented")
+				case '.':
+					state := new(NFA_State)
+					state^ = NFA_Rune{ matches = {runes = Rune_Class.Any} }
+					if frag.first_state == nil {
+						frag.first_state = state
+						frag.ends = new_ends(state)
+					} else {
+						link(frag.ends[:], state)
+						last_linked_ends = frag.ends[:]
+						frag.ends = new_ends(state)
+					}
+					subfrag = { state, frag.ends }
+
+				case:
+					state := new(NFA_State)
+					state^ = NFA_Rune{ matches = {runes = r} }
+					if frag.first_state == nil {
+						frag.first_state = state
+						frag.ends = new_ends(state)
+					} else {
+						link(frag.ends[:], state)
+						last_linked_ends = frag.ends[:]
+						frag.ends = new_ends(state)
+					}
+					subfrag = { state, frag.ends }
+			}
 		}
+
+		return frag, nil
 	}
 
-	push_state(NFA_Accept{})
-	concat()
+	final_frag, err := compile_fragment(expr)
+	if err != nil {
+		return {}, err
+	}
 
-	return pattern, nil
+	accept := new(NFA_State)
+	accept^ = NFA_Accept{}
+	link(final_frag.ends[:], accept)
+
+	return {final_frag.first_state}, nil
 }
 
 destroy_nfa :: proc(nfa: ^NFA_State) {}
@@ -159,9 +190,8 @@ NFA_End_Capture :: struct {
 NFA_Accept :: struct{}
 
 Rune_Matcher :: struct {
-	rule: union {
+	runes: union #no_nil {
 		rune,
-		Rune_Range,
 		[]Rune_Range,
 		Rune_Class,
 	},
