@@ -3,6 +3,7 @@ package regexp
 import sa "core:container/small_array"
 import "core:strings"
 import "core:runtime"
+import "core:unicode/utf8"
 
 Pattern :: struct {
 	initial_state: ^NFA_State,
@@ -16,6 +17,7 @@ Error :: union {
 Regexp_Error :: struct {
 	type: enum{
 		Dangling_Quantifier = 1,
+		Invalid_Escape,
 	},
 	position: int,
 }
@@ -130,7 +132,31 @@ compile :: proc(expr: string, allocator := context.allocator) -> (Pattern, Error
 					subfrag = {nil, nil}
 
 				case '[': panic("not implemented")
-				case '\\': panic("not implemented")
+				case '\\':
+					skip = 1
+					switch next_r := utf8.rune_at(expr, i + utf8.rune_size(r)); next_r {
+						case '\\', '[', ']', '(', ')', '{', '}', '+', '*', '?', '^', '$':
+							subfrag, last_linked_ends = rune_node(&frag, {runes = next_r})
+
+						case 'd':
+							subfrag, last_linked_ends = rune_node(&frag, {runes = Rune_Class.Number})
+						case 'D':
+							subfrag, last_linked_ends = rune_node(&frag, {runes = Rune_Class.Number, invert = true})
+
+						case 'w':
+							subfrag, last_linked_ends = rune_node(&frag, {runes = Rune_Class.Word})
+						case 'W':
+							subfrag, last_linked_ends = rune_node(&frag, {runes = Rune_Class.Word, invert = true})
+
+						case 's':
+							subfrag, last_linked_ends = rune_node(&frag, {runes = Rune_Class.Space})
+						case 'S':
+							subfrag, last_linked_ends = rune_node(&frag, {runes = Rune_Class.Space, invert = true})
+
+						case:
+							return {}, Regexp_Error{ .Invalid_Escape, i }
+					}
+
 				case '.':
 					subfrag, last_linked_ends = rune_node(&frag, {runes = Rune_Class.Any})
 

@@ -1,8 +1,9 @@
 package regexp
 
+import "core:fmt"
+import "core:slice"
 import "core:strings"
 import "core:unicode"
-import "core:fmt"
 
 Match :: struct {
 	full: string,
@@ -25,10 +26,12 @@ match :: proc(p: Pattern, s: string, allocator := context.temp_allocator) -> (re
 				append(next_ss, ms)
 			case NFA_Rune:
 				if rune_in(r, state.matches) {
-					next_ms := ms
-					next_ms.state = state.next
-					next_ms.end = auto_cast i + 1
-					append(next_ss, next_ms)
+					next := ms
+					next.state = state.next
+					next.end = auto_cast i + 1
+					if !slice.contains(next_ss[:], next) {
+						append(next_ss, next)
+					}
 				}
 			case NFA_Split:
 				for next in state.options {
@@ -44,6 +47,7 @@ match :: proc(p: Pattern, s: string, allocator := context.temp_allocator) -> (re
 	}
 
 	for r, i in s {
+		// fmt.println(r, cur_ss)
 		for ms in cur_ss {
 			step(ms, r, i, &next_ss)
 		}
@@ -55,12 +59,20 @@ match :: proc(p: Pattern, s: string, allocator := context.temp_allocator) -> (re
 		}
 	}
 
+	is_accept :: proc(state: ^NFA_State) -> bool {
+		#partial switch st in state {
+			case NFA_Accept: return true
+			case NFA_Split: return is_accept(st.options[0]) || is_accept(st.options[1])
+		}
+		return false
+	}
+
+	// fmt.printf("\"%s\" %#v\n", s, cur_ss)
 	for ms in cur_ss {
-		#partial switch _ in ms.state {
-			case NFA_Accept:
-				return Match{
-					full = s[ms.start:ms.end],
-				}, nil
+		if is_accept(ms.state) {
+			return Match{
+				full = s[ms.start:ms.end],
+			}, nil
 		}
 	}
 
